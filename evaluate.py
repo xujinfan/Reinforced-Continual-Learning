@@ -79,12 +79,14 @@ class evaluate:
                                           self.task_list[task_id][1][flag:flag+self.batch_size])
                     flag+=self.batch_size
                     self.sess.run(train_step,feed_dict={self.x:batch_xs,self.y:batch_ys})
-                accuracy_val = self.sess.run(accuracy, feed_dict={self.x:self.task_list[task_id][2],
-                                                                  self.y:self.task_list[task_id][3]})
-                accuracy_test = self.sess.run(accuracy,feed_dict={self.x:self.task_list[task_id][4],
-                                                                  self.y:self.task_list[task_id][5]})
+                
                 if epoch%4==0 or epoch==self.epochs-1:
-                    print("task:%s,test accuracy:%s"%(task_id,accuracy_test))
+                    accuracy_val = self.sess.run(accuracy, feed_dict={self.x:self.task_list[task_id][2],
+                                                                  self.y:self.task_list[task_id][3]})
+                    print("task:%s, validation accuracy:%s"%(task_id,accuracy_val))
+                    
+            accuracy_test = self.sess.run(accuracy,feed_dict={self.x:self.task_list[task_id][4],
+                                                                  self.y:self.task_list[task_id][5]})
             self.var_list = self.sess.run(total_theta2)
             self.stamps[task_id]=[_.shape for _ in self.var_list]
             self.sess.close()
