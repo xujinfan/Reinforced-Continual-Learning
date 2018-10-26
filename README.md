@@ -1,5 +1,5 @@
 # Reinforced-Continual-Learning
-code for paper "Ju Xu, Zhanxing Zhu. Reinforced Continual Learning. NIPS 2018."
+code for paper "Ju Xu, Zhanxing Zhu. Reinforced Continual Learning. NIPS 2018." https://arxiv.org/abs/1805.12369
 
 How to run it?
 
