@@ -4,21 +4,12 @@ Created on Fri Jan 12 19:27:34 2018
 
 @author: Jason
 """
-
-from keras.models import Model
-from keras.layers import Input, Dense, Conv2D, Flatten, MaxPooling2D, Dropout
-from keras import backend as K
-from keras import optimizers,regularizers
-from keras.utils import to_categorical
-import torch
 import warnings
 warnings.filterwarnings("ignore")
 import tensorflow as tf
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL']='3'
-import pdb
 import numpy as np
-from copy import deepcopy
 from evaluate import evaluate
 from policy_gradient import Controller
 import argparse
@@ -50,26 +41,6 @@ class RCL:
         data = pickle.load(open(self.data_path, "rb"))
         return data
 
-    def test_accuracy(self,vars):
-        with tf.Graph().as_default() as h:
-            sess = tf.Session(graph=h)
-            K.set_session(sess)
-            shapes = [_.shape for _ in vars]
-            inputs = Input(shape=(shapes[0][0],))
-            x = Dense(shapes[0][1], activation='relu', kernel_regularizer=regularizers.l2(0.0001))(inputs)
-            x = Dense(shapes[2][1], activation='relu', kernel_regularizer=regularizers.l2(0.0001))(x)
-            outputs = Dense(shapes[4][1], activation='softmax', kernel_regularizer=regularizers.l2(0.0001))(x)
-            model = Model(inputs=inputs, outputs=outputs)
-            model.compile(optimizer=optimizers.Adam(lr=0.001, beta_1=0.9, beta_2=0.999,
-                      epsilon=1e-08),loss='categorical_crossentropy',metrics=['accuracy'])
-            model.set_weights(vars)
-            accuracys = []
-            for test_id in range(0, self.num_tasks):
-                accuracys.append(model.evaluate(self.task_list[test_id][4],
-                            self.task_list[test_id][5],verbose=0)[1])
-            sess.close()
-            return accuracys
-
     def train(self):
         self.best_params={}
         self.result_process = []
@@ -78,29 +49,42 @@ class RCL:
             if task_id == 0:
                 with tf.Graph().as_default() as g:
                     with tf.name_scope("before"):
-                        inputs = Input(shape=(784,))
-                        x = Dense(312, activation='relu', 
-                                  kernel_regularizer=regularizers.l2(0.0001))(inputs)
-                        x = Dense(128, activation='relu', 
-                                  kernel_regularizer=regularizers.l2(0.0001))(x)
-                        outputs = Dense(10, activation='softmax', 
-                                        kernel_regularizer=regularizers.l2(0.0001))(x)
-                        model = Model(inputs=inputs, outputs=outputs)
-                        model.compile(optimizer=optimizers.Adam(lr=0.001, beta_1=0.9, beta_2=0.999,
-                                     epsilon=1e-08),loss='categorical_crossentropy',metrics=['accuracy'])
-                        accuracys = []
-                        for test_id in range(0,self.num_tasks):
-                            accuracys.append(model.evaluate(self.task_list[test_id][4], 
-                                            self.task_list[test_id][5],verbose=0)[1])
-
-                        model.fit(self.task_list[task_id][0], self.task_list[task_id][1],
-                                  batch_size = self.batch_size, epochs=10)
-                        accuracys = []
-                        for test_id in range(0,self.num_tasks):
-                            accuracys.append(model.evaluate(self.task_list[test_id][4], 
-                                            self.task_list[test_id][5],verbose=0)[1])
-                    self.vars = model.get_weights()
-                    self.best_params[task_id] = [accuracys[task_id],self.vars]
+                        inputs = tf.placeholder(shape=(None, 784), dtype=tf.float32)
+                        y = tf.placeholder(shape=(None, 10), dtype=tf.float32)
+                        w1 = tf.Variable(tf.truncated_normal(shape=(784,312), stddev=0.01))
+                        b1 = tf.Variable(tf.constant(0.1, shape=(312,)))
+                        w2 = tf.Variable(tf.truncated_normal(shape=(312,128), stddev=0.01))
+                        b2 = tf.Variable(tf.constant(0.1, shape=(128,)))
+                        w3 = tf.Variable(tf.truncated_normal(shape=(128,10), stddev=0.01))
+                        b3 = tf.Variable(tf.constant(0.1, shape=(10,)))
+                        output1 = tf.nn.relu(tf.nn.xw_plus_b(inputs,w1,b1,name="output1"))
+                        output2 = tf.nn.relu(tf.nn.xw_plus_b(output1,w2,b2,name="output2"))
+                        output3 = tf.nn.xw_plus_b(output2,w3,b3,name="output3")
+                        loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(labels=y, logits=output3)) + \
+                               0.0001*(tf.nn.l2_loss(w1) + tf.nn.l2_loss(w2) + tf.nn.l2_loss(w3))
+                        if self.args.optimizer=="adam":
+                            optimizer = tf.train.AdamOptimizer(learning_rate=self.args.lr)
+                        elif self.args.optimizer=="rmsprop":
+                            optimizer = tf.train.RMSPropOptimizer(learning_rate=self.lr)
+                        elif self.args.optimizer=="sgd":
+                            optimizer = tf.train.GradientDescentOptimizer(learning_rate=self.lr)
+                        else:
+                            raise Exception("please choose one optimizer")
+                        train_step = optimizer.minimize(loss)
+                        accuracy = tf.reduce_mean(tf.cast(tf.equal(tf.argmax(y,axis=1),tf.argmax(output3,axis=1)),tf.float32))
+                        sess = self.create_session()
+                        sess.run(tf.global_variables_initializer())
+                        l = len(self.task_list[0][1])
+                        for epoch in range(self.epochs):
+                            flag = 0
+                            for _ in range(l//self.batch_size+1):
+                                batch_xs, batch_ys = (self.task_list[task_id][0][flag:flag+self.batch_size],self.task_list[task_id][1][flag:flag+self.batch_size])
+                                flag += self.batch_size
+                                sess.run(train_step,feed_dict={inputs:batch_xs, y:batch_ys})
+                        accuracy_test = sess.run(accuracy, feed_dict={inputs:self.task_list[task_id][4], y:self.task_list[task_id][5]})
+                        print("test accuracy: ", accuracy_test)
+                        self.vars = sess.run([w1,b1,w2,b2,w3,b3])
+                    self.best_params[task_id] = [accuracy_test,self.vars]
             else:
                 controller = Controller(self.args)
                 results = []
@@ -112,13 +96,14 @@ class RCL:
                              actions=actions, task_id = task_id)
 
                     results.append(accuracy_val)
-                    print("test accuracy : ", accuracy_test)
+                    print("test accuracy: ", accuracy_test)
                     reward = accuracy_val - self.penalty*sum(actions)
-                    print("reward :", reward)
+                    print("reward: ", reward)
                     if reward > best_reward:
                         best_reward = reward
                         self.best_params[task_id] = (accuracy_test, self.evaluates.var_list)
                     controller.train_controller(reward)
+                controller.close_session()
                 self.result_process.append(results)
                 self.vars = self.best_params[task_id][1]
         

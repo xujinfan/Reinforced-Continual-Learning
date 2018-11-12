@@ -4,156 +4,122 @@ Created on Wed Apr 25 18:45:08 2018
 
 @author: Jason
 """
-import torch
-import torch.nn as nn
-from torch.nn import init
-import torchvision.datasets as dsets
-import torchvision.transforms as transforms
-from torch.autograd import Variable
-import torch.nn.functional as F
-from ipdb import set_trace
-import argparse
+
 import numpy as np
+import tensorflow as tf
 
 
-class PolicyEstimator(nn.Module):
-    '''
-    policy function approximator
-    '''
-    def __init__(self,args):
-        super(PolicyEstimator,self).__init__()
-        self.input_size = args.state_space
-        self.state_space = args.state_space
-        self.hidden_size = args.hidden_size
-        self.batch_size = args.batch_size
-        self.num_layers = args.num_layers
-        self.actions_num = args.actions_num
-        self.lstm = nn.LSTM(self.input_size, self.hidden_size, self.
-                            num_layers, batch_first=True)
-        for layer_p in self.lstm._all_weights:
-            for p in layer_p:
-                # if 'weight' in p:     # uncomment to initialize weights only
-                init.uniform(self.lstm.__getattr__(p), -0.08, 0.08)   # intra LSTM weights/ bias initialized
-        self.hidden2output = nn.Linear(self.hidden_size, self.state_space)
-        init.uniform(self.hidden2output.weight.data, -0.08, 0.08)     # weights to output from U[-0.08, 0.08]  
-        init.uniform(self.hidden2output.bias.data, -0.08, 0.08)       # bias to output from U[-0.08, 0.08]
-        self.hidden = self.init_hidden()
+class PolicyEstimator:
+    """
+    Policy Function approximator.
+    """
 
-    def init_hidden(self):
-        hidden = (Variable(torch.zeros(self.num_layers, self.batch_size,  self.hidden_size)),  # hidden = 0
-                Variable(torch.zeros(self.num_layers, self.batch_size, self.hidden_size)))         # tried with randN also, didn't work
-        return hidden
+    def __init__(self, args, learning_rate=0.01, scope="policy_estimator"):
+        with tf.variable_scope(scope):
+            self.args = args
+            self.input_size = args.state_space
+            self.state_space = args.state_space
+            self.hidden_size = args.hidden_size
+            self.num_layers = args.num_layers
+            self.actions_num = args.actions_num
+            self.state = tf.placeholder(dtype=tf.float32, shape=(None,self.state_space), name="states")
+            self.actions = tf.placeholder(dtype=tf.int32, shape=(self.actions_num, ), name="actions")
+            self.target = tf.placeholder(dtype=tf.float32, name="target")
 
-    def forward(self,x):
-        self.policy_actions = []
-        self.actions = []
-        sum_prob=[]
-        for i in range(self.actions_num):
-            if i==0:
-                outputs,hidden = self.lstm(x.view(1,1,-1))
-            else:
-                outputs,hidden = self.lstm(x.view(1,1,-1),hidden)
-            classifier = self.hidden2output(outputs[:,-1,:].view(-1))
-            preds = F.softmax(classifier,dim=0)
-            temp = F.log_softmax(classifier,dim=0)
-            x = preds.view(1,1,-1)
-            self.policy_actions.append(preds)
-            max_index = np.argmax(preds.data)
-            self.actions.append(max_index)
-            sum_prob.append(temp[max_index])
+            # This is just table lookup estimator
+            self.hidden2output_w = tf.Variable(tf.truncated_normal(shape=(self.hidden_size, self.state_space), stddev=0.01))
+            self.hidden2output_b = tf.Variable(tf.constant(0.1,shape=(self.state_space,)))
+            cell = tf.nn.rnn_cell.MultiRNNCell([tf.nn.rnn_cell.BasicLSTMCell(self.hidden_size) for _ in range(self.num_layers)], state_is_tuple=True)
+            hidden_state = cell.zero_state(1, dtype=tf.float32)
+            inputs = self.state
+            self.outputs = []
+            with tf.variable_scope("LSTM"):
+                for time_step  in range(self.actions_num):
+                    (cell_output, hidden_state) = cell(inputs, hidden_state)
+                    inputs = tf.nn.softmax(tf.nn.xw_plus_b(cell_output, self.hidden2output_w, self.hidden2output_b))
+                    self.outputs.append(inputs)
+            for time_step in range(self.actions_num):
+                if time_step == 0:
+                    picked_action_prob = self.outputs[time_step][0,self.actions[time_step]]
+                else:
+                    picked_action_prob = picked_action_prob*self.outputs[time_step][0,self.actions[time_step]]
+            #loss and training op
+            self.loss =  -tf.log(picked_action_prob)*self.target
 
-        return self.policy_actions
-    
+            self.optimizer = tf.train.AdamOptimizer(learning_rate=args.lr)
+            self.train_op = self.optimizer.minimize(
+                self.loss, global_step=tf.contrib.framework.get_global_step())
 
-class ValueEstimator(nn.Module):
-    '''
-    value function approximator
-    '''
-    def __init__(self,args):
-        super(ValueEstimator,self).__init__()
-        self.input_size = args.state_space
-        self.fc = nn.Linear(self.input_size,1)
-    def forward(self,x):
-        out = self.fc(x)
-        return torch.squeeze(out)
+    def predict(self, state, sess=None):
+        sess = sess if sess else tf.get_default_session()
+        return sess.run(self.outputs, {self.state: state})
+
+    def update(self, state, target, actions, sess=None):
+        sess = sess or tf.get_default_session()
+        feed_dict = {self.state: state, self.target: target, self.actions: actions}
+        _, loss = sess.run([self.train_op, self.loss], feed_dict)
+        return loss
 
 
-class Controller(object):
-    '''
-    update PolicyEstimator and ValueEstimator
-    '''
-    def __init__(self,args):
+class ValueEstimator:
+    """
+    Value Function approximator.
+    """
+
+    def __init__(self, args, learning_rate=0.005, scope="value_estimator"):
+        with tf.variable_scope(scope):
+            self.state_space = args.state_space
+            self.state = tf.placeholder(dtype=tf.float32, shape=(None, self.state_space), name="states")
+            self.target = tf.placeholder(dtype=tf.float32, name="target")
+
+            # This is just table lookup estimator
+            self.state = tf.reshape(self.state, shape=(1, self.state_space))
+            self.output_layer = tf.contrib.layers.fully_connected(
+                inputs=self.state,
+                num_outputs=1,
+                activation_fn=None,
+                weights_initializer=tf.zeros_initializer)
+
+            self.value_estimate = tf.squeeze(self.output_layer)
+            self.loss = tf.squared_difference(self.value_estimate, self.target)
+
+            self.optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate)
+            self.train_op = self.optimizer.minimize(
+                self.loss, global_step=tf.contrib.framework.get_global_step())
+
+    def predict(self, state, sess=None):
+        sess = sess if sess else tf.get_default_session()
+        return sess.run(self.value_estimate, {self.state: state})
+
+    def update(self, state, target, sess=None):
+        sess = sess or tf.get_default_session()
+        feed_dict = { self.state: state, self.target: target }
+        _, loss = sess.run([self.train_op, self.loss], feed_dict)
+        return loss
+
+class Controller:
+    def __init__(self, args, scope="Controller"):
+        self.args = args
+        self.state = np.random.random(size=(1, args.state_space))
         self.policy_estimator = PolicyEstimator(args)
         self.value_estimator = ValueEstimator(args)
-        self.state = Variable(torch.randn(1,1,args.state_space))
-        self.epison = 0.5
-        self.steps = 0
-        self.args = args
-        self.actions_values = []
-        self.set_value(0.8)
-        self.opt_policy = torch.optim.Adam(self.policy_estimator.parameters(), 
-                       lr = args.lr)
-        self.opt_value = torch.optim.Adam(self.value_estimator.parameters(), 
-                       lr = 0.005)
-        self.loss_value_fc = torch.nn.MSELoss()
-        
+        self.sess = tf.Session()
+        self.sess.run(tf.global_variables_initializer())
+
+    def train_controller(self, reward):
+        baseline_value = self.value_estimator.predict(self.state, self.sess)
+        advantage = reward - baseline_value
+        self.value_estimator.update(self.state, reward, self.sess)
+        self.policy_estimator.update(self.state, advantage, self.actions, self.sess)
+
     def get_actions(self):
-        if self.args.method=="random":
-            self.actions = np.random.choice(range(self.args.state_space), self.args.actions_num)
-            return self.actions
-        policy_actions = self.policy_estimator(self.state)
-        self.sum_prob = []
+        action_probs = self.policy_estimator.predict(self.state, self.sess)
         self.actions = []
         for i in range(self.args.actions_num):
-            temp = policy_actions[i]
-            prob = np.round(temp.data.numpy(),5)/sum(np.round(temp.data.numpy(),5))
-            index = np.random.choice(range(self.args.state_space),p=prob)
-            self.actions.append(index)
-            self.sum_prob.append(policy_actions[i][index])
-        
+            prob = action_probs[i]
+            action = np.random.choice(np.arange(self.args.state_space),p=prob[0])
+            self.actions.append(action)
         return self.actions
 
-    def get_value(self):
-        out = self.value_estimator(self.state)
-        return out
-
-    def set_value(self,value):
-        self.actions_values.append(value)
-
-    def average_value(self):
-        return np.mean(self.actions_values)
-
-    def max_value(self):
-        return np.max(self.actions_values)
-
-    def train_controller(self,reward):
-        if self.args.method=="random":
-            return
-        if self.args.bendmark == 'max':
-            state_value = self.max_value()
-        elif self.args.bendmark == 'average':
-            state_value = self.average_value()
-        elif self.args.bendmark == 'critic':
-            state_value = self.get_value()
-        else:
-            raise Exception("please define the bendmark")
-            
-        target = Variable(torch.FloatTensor([float(reward)]))
-        value_loss = self.loss_value_fc(state_value,target)
-        self.opt_value.zero_grad()
-        value_loss.backward(retain_graph=True)
-        self.opt_value.step()
-        
-        self.opt_policy.zero_grad()
-        advantage = reward - state_value.detach().numpy() 
-        self.set_value(reward)
-        for i,value in enumerate(self.sum_prob):
-            if i==0:
-                sum_prob = torch.log(value)
-            else:
-                sum_prob += torch.log(value)
-        loss = -sum_prob*advantage
-        loss = loss.reshape(-1)[0]
-        loss.backward()
-        self.opt_policy.step()
-        
+    def close_session(self):
+        self.sess.close()
