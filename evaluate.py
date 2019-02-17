@@ -36,7 +36,7 @@ class evaluate:
                 value = tf.concat([var_list[2],tf.truncated_normal((actions[0],old_shape[1]),stddev=0.01)],axis=0)
                 fc2 = tf.Variable(tf.concat([value,tf.truncated_normal((actions[0]+old_shape[0],actions[1]),stddev=0.01)],axis=1))
                 b2 = tf.Variable(tf.concat([var_list[3],tf.constant(0.1,shape=(actions[1],))],axis=0))
-                mask_fc2 = np.concatenate([np.concatenate([np.zeros_like(var_list[2]),np.ones((actions[0],old_shape[1]))],axis=0),np.zeros((actions[0]+old_shape[0],actions[1]))],axis=1)
+                mask_fc2 = np.concatenate([np.concatenate([np.zeros_like(var_list[2]),np.ones((actions[0],old_shape[1]))],axis=0),np.ones((actions[0]+old_shape[0],actions[1]))],axis=1)
                 mask_b2 = np.concatenate([np.zeros_like(var_list[3]),np.ones((actions[1],))],axis=0)
 
                 fc3 = tf.Variable(tf.truncated_normal((var_list[4].shape[0]+actions[1],var_list[4].shape[1])))

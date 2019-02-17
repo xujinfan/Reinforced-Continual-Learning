@@ -86,6 +86,7 @@ class RCL:
                         self.vars = sess.run([w1,b1,w2,b2,w3,b3])
                     self.best_params[task_id] = [accuracy_test,self.vars]
             else:
+                tf.reset_default_graph()
                 controller = Controller(self.args)
                 results = []
                 best_reward = 0
